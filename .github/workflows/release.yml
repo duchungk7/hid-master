@@ -44,17 +44,16 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          run: |
-          sudo apt-get update
           sudo apt-get install -y \
             pkg-config \
             libudev-dev \
             libgtk-3-dev \
-            libwebkit2gtk-4.0-dev \
+            libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libsoup-3.0-dev # 核心修復：加入 soup3 開發庫
+            libsoup-3.0-dev \
+            javascriptcoregtk-4.1-dev
 
       - name: install frontend dependencies
         run: npm install
