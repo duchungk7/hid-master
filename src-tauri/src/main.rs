@@ -94,35 +94,55 @@ fn scan_hid_devices() -> Result<Vec<HidDevice>, String> {
 // --- 關鍵修正：針對不同作業系統的 Write 邏輯 ---
 #[tauri::command]
 async fn send_hid_command(path: String, data: Vec<u8>) -> Result<Vec<u8>, String> {
-    let api = HidApi::new().map_err(|e| e.to_string())?;
-    let c_path = CString::new(path).map_err(|_| "Invalid path format")?;
+    // 1. 初始化 HidApi
+    let api = HidApi::new().map_err(|e| format!("HID API 初始化失敗: {}", e))?;
+    let c_path = CString::new(path.clone()).map_err(|_| "路徑格式錯誤")?;
+
+    // 2. 嘗試開啟設備
+    let device = match api.open_path(&c_path) {
+        Ok(dev) => dev,
+        Err(e) => {
+            let err_msg = e.to_string();
+            if cfg!(target_os = "macos") && err_msg.contains("0xE00002C5") {
+                return Err("開啟失敗: macOS 系統正在獨佔此介面。請在前端過濾掉 Usage Page 1 的路徑，選擇 Vendor Defined 介面。".into());
+            }
+            return Err(format!("開啟失敗: {}", err_msg));
+        }
+    };
+
+    // 3. 準備寫入數據 (Report ID 處理)
+    // 大多數 HID 設備（特別是電競滑鼠自定義協定）需要 65 字節
+    // 第一個字節必須是 Report ID (通常為 0x00)
+    let mut write_buf = vec![0u8; 65]; 
+    let copy_len = std::cmp::min(data.len(), 64);
     
-    let device = api.open_path(&c_path)
-        .map_err(|e| format!("開啟失敗 (Linux 請檢查 udev 權限): {}", e))?;
-
-    // --- 跨平台 Report ID 處理策略 ---
-    // 很多 HID 設備在 Windows 需要 0x00 開頭補齊到 65 Bytes
-    // 但某些 Linux 驅動會拒絕大於協定定義長度的數據
-    let mut write_data = data;
-
-    // 如果設備是特定類別或是在 macOS/Linux 下，
-    // 且前端沒給 Report ID，我們才自動補 0。
-    // 這裡我們維持你的邏輯，但增加錯誤捕捉。
-    if write_data.len() < 65 && cfg!(target_os = "windows") {
-        let mut report = vec![0u8; 65];
-        let len = std::cmp::min(write_data.len(), 65);
-        report[..len].copy_from_slice(&write_data[..len]);
-        write_data = report;
+    // 如果數據本身已經包含 Report ID 0x00 且長度正確，直接使用
+    // 否則，我們強制將數據放在第 2 個字節開始 (Index 1)
+    if data.is_empty() {
+        return Err("數據不能為空".into());
     }
 
-    device.write(&write_data).map_err(|e| format!("寫入失敗: {}", e))?;
+    if data[0] == 0x00 && data.len() <= 65 {
+        // 前端已補 0x00
+        let actual_len = std::cmp::min(data.len(), 65);
+        write_buf[..actual_len].copy_from_slice(&data[..actual_len]);
+    } else {
+        // 前端未補 0x00，我們幫它補在最前面
+        write_buf[1..copy_len + 1].copy_from_slice(&data[..copy_len]);
+    }
 
-    // --- 讀取邏輯優化 ---
-    // 在 Linux 下，read 速度很快；在 macOS 下，read 可能會阻塞
+    // 4. 寫入設備
+    device.write(&write_buf).map_err(|e| format!("寫入失敗: {}", e))?;
+
+    // 5. 讀取回傳 (增加 macOS 穩定性)
     let mut read_buf = [0u8; 64];
-    match device.read_timeout(&mut read_buf, 1000) { // 增加到 1s 確保跨平台回傳穩定
-        Ok(res) if res > 0 => Ok(read_buf[..res].to_vec()),
-        Ok(_) => Ok(Vec::new()),
+    // 使用 timeout 避免在某些平台永久阻塞
+    match device.read_timeout(&mut read_buf, 1000) {
+        Ok(res) if res > 0 => {
+            // macOS 有時會在讀取結果前頭多加一個 Report ID 0x00，視情況過濾
+            Ok(read_buf[..res].to_vec())
+        },
+        Ok(_) => Ok(Vec::new()), // 超時但無資料
         Err(e) => Err(format!("讀取異常: {}", e)),
     }
 }
