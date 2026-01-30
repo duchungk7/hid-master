@@ -25,6 +25,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "macOS": {
+      "entitlements": "Entitlements.plist" 
+    },
     "copyright": "Copyright © 2026",
     "icon": [
       "icons/32x32.png",
